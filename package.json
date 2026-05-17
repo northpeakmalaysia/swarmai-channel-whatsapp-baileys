@@ -1,0 +1,61 @@
+{
+  "name": "@swarmai/channel-whatsapp-baileys",
+  "version": "0.1.0",
+  "description": "SwarmAI channel plugin: WhatsApp Personal via Baileys (direct WebSocket, light, fast text). Pair as a linked device.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "swarmai-package.yaml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --max-warnings 0",
+    "test": "vitest run",
+    "clean": "rimraf dist"
+  },
+  "peerDependencies": {
+    "@swarmai/plugin-sdk": ">=0.5.0",
+    "@swarmai/shared": ">=0.5.0",
+    "@swarmai/memory": ">=0.5.0"
+  },
+  "peerDependenciesMeta": {
+    "@swarmai/plugin-sdk": { "optional": false },
+    "@swarmai/shared": { "optional": false },
+    "@swarmai/memory": { "optional": false }
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.0",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/qrcode-terminal": "^0.12.2",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.6",
+    "@swarmai/plugin-sdk": "file:../../../source/NorthPeak/Project/SwarmAI - CEO Agent/packages/plugin-sdk",
+    "@swarmai/shared": "file:../../../source/NorthPeak/Project/SwarmAI - CEO Agent/packages/shared",
+    "@swarmai/memory": "file:../../../source/NorthPeak/Project/SwarmAI - CEO Agent/packages/memory"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/northpeakmalaysia/swarmai-channel-whatsapp-baileys"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "//deps": "@whiskeysockets/baileys + qrcode-terminal are real (non-optional) runtime deps so the Hub install can resolve them. Workspace @swarmai/* deps are peerDependencies (host provides them) with file: devDependencies for local-build testing only.",
+  "//channel-kind": "Channel kind is PRESERVED as 'whatsapp-personal' (NOT 'whatsapp-baileys'). Existing operator pairings reference this kind in workspace configs, approval ledgers, and session storage paths. See docs/38-whatsapp-dual-plugin-plan.md §Channel-kind preservation."
+}

@@ -1,0 +1,50 @@
+# Runtime metadata read by the SwarmAI plugin loader.
+# Cross-validated against the @swarmai/channel-whatsapp-baileys manifest.yaml
+# that lives under packages/official/channel-whatsapp-baileys/ in the
+# SwarmAI Hub repo.
+#
+# Channel kind is PRESERVED as 'whatsapp-personal' (NOT 'whatsapp-baileys')
+# so existing operator pairings, workspace configs, and approval ledgers
+# continue to work after migration. See docs/38-whatsapp-dual-plugin-plan.md.
+
+id: '@swarmai/channel-whatsapp-baileys'
+version: '0.1.0'
+kind: 'channel'
+entry: './dist/index.js'
+
+channel:
+  # The channel kind external callers use (e.g. `send_message(channel: 'whatsapp-personal')`).
+  # Kept as 'whatsapp-personal' for backwards compatibility — see doc 38.
+  id: whatsapp-personal
+  features:
+    dm: true
+    group: true
+    thread: false
+    reaction: true
+    edit: false
+    delete: false
+    mediaImage: true
+    mediaVideo: true
+    mediaAudio: true
+    voiceMemo: true
+    voiceCall: false
+    typing: true
+    readReceipt: true
+    formatting: markdown-limited       # *bold* / _italic_ / `mono`; no headers / links
+    maxMessageBytes: 65536              # WhatsApp's text body limit
+    maxAttachmentBytes: 104857600       # 100MB document cap
+  pairing:
+    flow: qr-code                       # primary
+    altFlow: pairing-code               # 8-digit alternative for keyboard-less devices
+    docsUrl: 'https://docs.northpeak.app/channels/whatsapp-baileys'
+
+permissions:
+  network: bidirectional                # WebSocket to web.whatsapp.com + HTTPS to mmg.whatsapp.net
+  filesystem: read-write-scratch        # session credentials at <workspace>/.swarmai/baileys/
+  secrets: []                           # no API key — pair via QR
+
+capabilities:
+  - 'network:fetch'
+  - 'network:websocket'
+  - 'fs:read'
+  - 'fs:write-scratch'
