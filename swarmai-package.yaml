@@ -8,7 +8,7 @@
 # continue to work after migration. See docs/38-whatsapp-dual-plugin-plan.md.
 
 id: '@swarmai/channel-whatsapp-baileys'
-version: '0.2.0'
+version: '0.2.1'
 kind: 'channel'
 entry: './dist/index.js'
 
