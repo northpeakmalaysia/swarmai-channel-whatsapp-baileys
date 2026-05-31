@@ -16,7 +16,7 @@ import {
   WhatsAppPersonalAuthSchema,
   type WhatsAppPersonalConfig,
 } from './types.js';
-import { BaileysClient, type BaileysAdapter } from './baileys-client.js';
+import { BaileysClient, type BaileysAdapter, type WhatsAppCapabilities } from './baileys-client.js';
 import { normaliseBaileysMessage } from './inbound-normaliser.js';
 import { sendOutboundText } from './outbound-sender.js';
 
@@ -127,6 +127,14 @@ export interface WhatsAppPersonalBundle {
   /** Direct access to the underlying client — useful for ops tooling
    *  (status, manual reconnect). */
   getClient(): BaileysClient | null;
+  /**
+   * Full WhatsApp capability surface (groups, contacts, profile,
+   * reactions, location) for the `whatsapp.*` tool family. Returns
+   * `null` when the client hasn't started yet (pre-pair / stopped) so
+   * the host can surface a clean "channel not connected" instead of
+   * throwing. The tool layer re-checks connection per call anyway.
+   */
+  capabilities(): WhatsAppCapabilities | null;
   /**
    * Compatibility shim — the Cloud variant exposes `handleWebhook`;
    * Personal mode has no webhook so this always returns 405. Lets the
@@ -459,6 +467,7 @@ export function createWhatsAppPersonalPlugin(
     source,
     handleWebhook,
     getClient: () => client,
+    capabilities: () => (client ? client.getCapabilities() : null),
     sendTyping: sendTypingHook,
     // Tests / ops-tooling can read the last connection event.
     // (Not in the public type because callers shouldn't depend on it

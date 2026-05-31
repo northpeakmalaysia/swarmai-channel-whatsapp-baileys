@@ -1,6 +1,6 @@
 {
   "name": "@swarmai/channel-whatsapp-baileys",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "SwarmAI channel plugin: WhatsApp Personal via Baileys (direct WebSocket, light, fast text). Pair as a linked device.",
   "type": "module",
   "main": "./dist/index.js",

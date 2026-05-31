@@ -6,6 +6,7 @@ import { EventEmitter } from 'node:events';
 import {
   BaileysClient,
   extractPhoneFromJid,
+  extractInviteCode,
   type BaileysAdapter,
   type BaileysSocketHandle,
   type BaileysConnectionUpdate,
@@ -40,6 +41,47 @@ function makeFakeSocket(): {
     readMessages: vi.fn(async () => {}),
     end: vi.fn(async () => {}),
     ws: { close: () => {} },
+    // --- capability surface (group/contact/profile) ---
+    groupFetchAllParticipating: vi.fn(async () => ({
+      '111@g.us': {
+        id: '111@g.us',
+        subject: 'Team',
+        size: 2,
+        announce: false,
+        participants: [
+          { id: '628999:0@s.whatsapp.net', admin: 'superadmin' as const },
+          { id: '628111@s.whatsapp.net', admin: null },
+        ],
+      },
+    })),
+    groupMetadata: vi.fn(async (jid: string) => ({
+      id: jid,
+      subject: 'Team',
+      desc: 'hello',
+      owner: '628999@s.whatsapp.net',
+      size: 1,
+      participants: [{ id: '628999:0@s.whatsapp.net', admin: 'superadmin' as const }],
+    })),
+    groupCreate: vi.fn(async (subject: string) => ({ id: 'new@g.us', subject, participants: [] })),
+    groupLeave: vi.fn(async () => {}),
+    groupParticipantsUpdate: vi.fn(async (_jid: string, parts: string[]) =>
+      parts.map((jid) => ({ jid, status: '200' })),
+    ),
+    groupUpdateSubject: vi.fn(async () => {}),
+    groupUpdateDescription: vi.fn(async () => {}),
+    groupInviteCode: vi.fn(async () => 'INVITECODE123'),
+    groupRevokeInvite: vi.fn(async () => 'NEWCODE456'),
+    groupAcceptInvite: vi.fn(async () => 'joined@g.us'),
+    groupGetInviteInfo: vi.fn(async () => ({ id: 'preview@g.us', subject: 'Preview', participants: [] })),
+    groupSettingUpdate: vi.fn(async () => {}),
+    onWhatsApp: vi.fn(async (...jids: string[]) =>
+      jids.map((j) => ({ jid: `${j}@s.whatsapp.net`, exists: true })),
+    ),
+    profilePictureUrl: vi.fn(async () => 'https://pps.whatsapp.net/pic.jpg'),
+    updateBlockStatus: vi.fn(async () => {}),
+    fetchStatus: vi.fn(async () => ({ status: 'Busy building' })),
+    updateProfileName: vi.fn(async () => {}),
+    updateProfileStatus: vi.fn(async () => {}),
   };
   return {
     socket,
@@ -53,6 +95,7 @@ function makeFakeSocket(): {
 function makeFakeAdapter(): {
   adapter: BaileysAdapter;
   saveCreds: ReturnType<typeof vi.fn>;
+  socket: BaileysSocketHandle;
   emitConn: (u: BaileysConnectionUpdate) => void;
   emitMessage: (msg: unknown) => void;
   sendTextMock: ReturnType<typeof vi.fn>;
@@ -69,6 +112,7 @@ function makeFakeAdapter(): {
       },
     },
     saveCreds,
+    socket: fake.socket,
     emitConn: fake.emitConn,
     emitMessage: fake.emitMessage,
     sendTextMock: fake.sendTextMock,
@@ -335,5 +379,100 @@ describe('BaileysClient', () => {
     // event would be ignored). Calling emit directly bypasses the
     // detached listeners, so we instead assert: status = idle.
     expect(client.getStatus()).toBe('idle');
+  });
+});
+
+describe('extractInviteCode', () => {
+  it('extracts the code from a full invite link', () => {
+    expect(extractInviteCode('https://chat.whatsapp.com/AbC123xyz')).toBe('AbC123xyz');
+  });
+  it('extracts from the /invite/ form', () => {
+    expect(extractInviteCode('https://chat.whatsapp.com/invite/Code999')).toBe('Code999');
+  });
+  it('passes a bare code through unchanged', () => {
+    expect(extractInviteCode('  PlainCode  ')).toBe('PlainCode');
+  });
+});
+
+describe('BaileysClient.getCapabilities', () => {
+  let tmp: string;
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'wa-caps-'));
+  });
+  afterEach(() => {
+    if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true });
+  });
+
+  async function connectedClient(): Promise<{
+    client: BaileysClient;
+    socket: BaileysSocketHandle;
+  }> {
+    const fake = makeFakeAdapter();
+    const config = WhatsAppPersonalConfigSchema.parse({
+      sessionId: 'caps-' + Date.now(),
+      sessionDir: join(tmp, 'session'),
+    });
+    const client = new BaileysClient({ config, adapter: fake.adapter });
+    await client.start();
+    fake.emitConn({ connection: 'open' });
+    return { client, socket: fake.socket };
+  }
+
+  it('listGroups normalises metadata + computes selfIsAdmin from own JID', async () => {
+    const { client } = await connectedClient();
+    const groups = await client.getCapabilities().listGroups();
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({ jid: '111@g.us', subject: 'Team', participantCount: 2 });
+    // self is 628999 (superadmin in the fixture) → selfIsAdmin true.
+    expect(groups[0]!.selfIsAdmin).toBe(true);
+  });
+
+  it('getGroupInfo surfaces description + owner + participants', async () => {
+    const { client } = await connectedClient();
+    const info = await client.getCapabilities().getGroupInfo('111@g.us');
+    expect(info.description).toBe('hello');
+    expect(info.owner).toBe('628999@s.whatsapp.net');
+    expect(info.participants).toHaveLength(1);
+  });
+
+  it('joinGroup extracts the invite code from a link before calling Baileys', async () => {
+    const { client, socket } = await connectedClient();
+    const r = await client.getCapabilities().joinGroup('https://chat.whatsapp.com/AbC123xyz');
+    expect(r.groupJid).toBe('joined@g.us');
+    expect(socket.groupAcceptInvite).toHaveBeenCalledWith('AbC123xyz');
+  });
+
+  it('checkOnWhatsApp maps results back to the requested inputs', async () => {
+    const { client } = await connectedClient();
+    const res = await client.getCapabilities().checkOnWhatsApp(['+60 11 2396 5866']);
+    expect(res[0]!.input).toBe('+60 11 2396 5866');
+    expect(res[0]!.exists).toBe(true);
+  });
+
+  it('addParticipants returns per-jid results', async () => {
+    const { client } = await connectedClient();
+    const res = await client
+      .getCapabilities()
+      .addParticipants('111@g.us', ['628111@s.whatsapp.net']);
+    expect(res).toEqual([{ jid: '628111@s.whatsapp.net', status: '200' }]);
+  });
+
+  it('sendReaction routes through sendMessage with a react payload', async () => {
+    const { client, socket } = await connectedClient();
+    await client.getCapabilities().sendReaction('111@g.us', 'wam-9', '👍');
+    expect(socket.sendMessage).toHaveBeenCalledWith('111@g.us', {
+      react: { text: '👍', key: { remoteJid: '111@g.us', id: 'wam-9', fromMe: false } },
+    });
+  });
+
+  it('throws a clear error when not connected', async () => {
+    const fake = makeFakeAdapter();
+    const config = WhatsAppPersonalConfigSchema.parse({
+      sessionId: 'caps-down-' + Date.now(),
+      sessionDir: join(tmp, 'session-down'),
+    });
+    const client = new BaileysClient({ config, adapter: fake.adapter });
+    await client.start(); // status = connecting, never opened
+    await expect(client.getCapabilities().listGroups()).rejects.toThrow(/connection not open/);
   });
 });

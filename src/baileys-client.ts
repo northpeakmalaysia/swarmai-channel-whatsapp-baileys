@@ -22,6 +22,10 @@ import { logger as sharedLogger } from '@swarmai/shared';
  */
 const SEND_TIMEOUT_TEXT_MS = 15_000;
 const SEND_TIMEOUT_MEDIA_MS = 45_000;
+/** Group/contact/profile control ops are small IQ round-trips; 20s is
+ *  generous headroom while still failing well before the agent's tool
+ *  budget when the WhatsApp socket is wedged. */
+const GROUP_OP_TIMEOUT_MS = 20_000;
 
 /**
  * Race a send-promise against a timeout, rejecting with a classified
@@ -124,6 +128,51 @@ export interface BaileysSocketHandle {
   end?(error?: Error | undefined): void | Promise<void>;
   ws?: { close?: () => void };
   logout?: () => Promise<void>;
+  // --- Group / contact / profile capability surface (Baileys 6.x) ---
+  // All optional so test fakes that only implement messaging keep
+  // type-checking; the wrapper throws a clear "not supported by this
+  // Baileys build" error when a method is missing at runtime.
+  groupFetchAllParticipating?(): Promise<Record<string, BaileysGroupMetadataRaw>>;
+  groupMetadata?(jid: string): Promise<BaileysGroupMetadataRaw>;
+  groupCreate?(subject: string, participants: string[]): Promise<BaileysGroupMetadataRaw>;
+  groupLeave?(jid: string): Promise<void>;
+  groupParticipantsUpdate?(
+    jid: string,
+    participants: string[],
+    action: 'add' | 'remove' | 'promote' | 'demote',
+  ): Promise<Array<{ status?: string; jid?: string }>>;
+  groupUpdateSubject?(jid: string, subject: string): Promise<void>;
+  groupUpdateDescription?(jid: string, description?: string): Promise<void>;
+  groupInviteCode?(jid: string): Promise<string | undefined>;
+  groupRevokeInvite?(jid: string): Promise<string | undefined>;
+  groupAcceptInvite?(code: string): Promise<string | undefined>;
+  groupGetInviteInfo?(code: string): Promise<BaileysGroupMetadataRaw>;
+  groupSettingUpdate?(
+    jid: string,
+    setting: 'announcement' | 'not_announcement' | 'locked' | 'unlocked',
+  ): Promise<void>;
+  onWhatsApp?(...jids: string[]): Promise<Array<{ jid?: string; exists?: boolean }> | undefined>;
+  profilePictureUrl?(jid: string, type?: 'image' | 'preview'): Promise<string | undefined>;
+  updateBlockStatus?(jid: string, action: 'block' | 'unblock'): Promise<void>;
+  fetchStatus?(jid: string): Promise<{ status?: string; setAt?: Date } | undefined>;
+  updateProfileName?(name: string): Promise<void>;
+  updateProfileStatus?(status: string): Promise<void>;
+}
+
+/** Structural shape of Baileys' GroupMetadata (the fields we surface). */
+export interface BaileysGroupMetadataRaw {
+  id: string;
+  subject?: string;
+  subjectOwner?: string;
+  subjectTime?: number;
+  creation?: number;
+  owner?: string;
+  desc?: string;
+  descId?: string;
+  announce?: boolean;
+  restrict?: boolean;
+  size?: number;
+  participants?: Array<{ id: string; admin?: 'admin' | 'superadmin' | null }>;
 }
 
 export interface BaileysConnectionUpdate {
@@ -160,6 +209,74 @@ export interface BaileysClientOptions {
  *   - `message` (msg: BaileysWAMessage)
  *   - `error` (err: Error)
  */
+/** Normalised group summary returned by `listGroups()`. */
+export interface WhatsAppGroupSummary {
+  jid: string;
+  subject: string;
+  participantCount: number;
+  /** True when the operator's own account is an admin/superadmin. */
+  selfIsAdmin: boolean;
+  /** True when only admins can post ("announcement" groups). */
+  announce: boolean;
+}
+
+/** Full group info returned by `getGroupInfo()` / `inviteInfo()`. */
+export interface WhatsAppGroupInfo extends WhatsAppGroupSummary {
+  owner?: string;
+  description?: string;
+  creation?: number;
+  /** True when only admins can edit group settings. */
+  restrict: boolean;
+  participants: Array<{ jid: string; admin: 'admin' | 'superadmin' | null }>;
+}
+
+export interface WhatsAppNumberCheck {
+  input: string;
+  jid?: string;
+  exists: boolean;
+}
+
+export interface WhatsAppParticipantResult {
+  jid: string;
+  status: string;
+}
+
+/**
+ * Adapter-agnostic WhatsApp capability contract. The Baileys client
+ * implements it here; the Web.js client implements a structural
+ * equivalent in its own repo; the `@swarmai/tools` factory mirrors the
+ * shape (so the plugin boundary stays clean — tools never import this).
+ */
+export interface WhatsAppCapabilities {
+  listGroups(): Promise<WhatsAppGroupSummary[]>;
+  getGroupInfo(jid: string): Promise<WhatsAppGroupInfo>;
+  createGroup(subject: string, participants: string[]): Promise<WhatsAppGroupInfo>;
+  leaveGroup(jid: string): Promise<void>;
+  addParticipants(jid: string, participants: string[]): Promise<WhatsAppParticipantResult[]>;
+  removeParticipants(jid: string, participants: string[]): Promise<WhatsAppParticipantResult[]>;
+  promoteParticipants(jid: string, participants: string[]): Promise<WhatsAppParticipantResult[]>;
+  demoteParticipants(jid: string, participants: string[]): Promise<WhatsAppParticipantResult[]>;
+  setGroupSubject(jid: string, subject: string): Promise<void>;
+  setGroupDescription(jid: string, description: string): Promise<void>;
+  setGroupSetting(
+    jid: string,
+    setting: 'announcement' | 'not_announcement' | 'locked' | 'unlocked',
+  ): Promise<void>;
+  getInviteCode(jid: string): Promise<string>;
+  revokeInviteCode(jid: string): Promise<string>;
+  joinGroup(inviteCodeOrLink: string): Promise<{ groupJid?: string }>;
+  inviteInfo(inviteCodeOrLink: string): Promise<WhatsAppGroupInfo>;
+  checkOnWhatsApp(numbers: string[]): Promise<WhatsAppNumberCheck[]>;
+  getProfilePicture(jid: string): Promise<string | null>;
+  blockContact(jid: string): Promise<void>;
+  unblockContact(jid: string): Promise<void>;
+  getStatus(jid: string): Promise<string | null>;
+  setOwnName(name: string): Promise<void>;
+  setOwnStatus(status: string): Promise<void>;
+  sendReaction(jid: string, messageId: string, emoji: string, opts?: { fromMe?: boolean; participant?: string }): Promise<void>;
+  sendLocation(jid: string, latitude: number, longitude: number, name?: string): Promise<string | undefined>;
+}
+
 export class BaileysClient extends EventEmitter {
   private readonly config: WhatsAppPersonalConfig;
   private readonly adapter: BaileysAdapter;
@@ -432,6 +549,174 @@ export class BaileysClient extends EventEmitter {
     }
   }
 
+  /**
+   * Resolve the live socket and assert a named method exists on it.
+   * Throws a clear, classified error when the socket isn't connected or
+   * the running Baileys build doesn't expose the capability (rather than
+   * the opaque `TypeError: x is not a function` Baileys would surface).
+   */
+  private capSocket<K extends keyof BaileysSocketHandle>(method: K): BaileysSocketHandle {
+    if (!this.socket) throw new Error('whatsapp-personal: socket not started');
+    if (this.status !== 'connected') {
+      throw new Error(
+        `whatsapp-personal: cannot run ${String(method)} — connection not open (status=${this.status}).`,
+      );
+    }
+    if (typeof this.socket[method] !== 'function') {
+      throw new Error(
+        `whatsapp-personal: ${String(method)} not supported by this Baileys build`,
+      );
+    }
+    return this.socket;
+  }
+
+  /**
+   * Full WhatsApp capability surface (groups, contacts, profile,
+   * reactions, location) backed by the live Baileys socket. Returned as
+   * a contract object so the host can hand it to the `whatsapp.*` tool
+   * family without the tools importing this package (plugin boundary).
+   *
+   * Every method asserts connection + method presence first, races a
+   * 20s timeout, and normalises Baileys' raw shapes into the stable
+   * result types above. Mutating ops (create/leave/participants/…) are
+   * gated to `policy: master` at the tool layer, not here.
+   */
+  getCapabilities(): WhatsAppCapabilities {
+    const selfDigits = (): string | null => bareDigitsFromJid(this.getOwnJid());
+    const op = <T>(name: keyof BaileysSocketHandle, run: (s: BaileysSocketHandle) => Promise<T>, label: string): Promise<T> => {
+      const s = this.capSocket(name);
+      return withSendTimeout(run(s), GROUP_OP_TIMEOUT_MS, label);
+    };
+    const toInfo = (raw: BaileysGroupMetadataRaw): WhatsAppGroupInfo =>
+      normalizeGroupInfo(raw, selfDigits());
+    const toSummary = (info: WhatsAppGroupInfo): WhatsAppGroupSummary => ({
+      jid: info.jid,
+      subject: info.subject,
+      participantCount: info.participantCount,
+      selfIsAdmin: info.selfIsAdmin,
+      announce: info.announce,
+    });
+    const participantResults = (
+      raw: Array<{ status?: string; jid?: string }> | undefined,
+      requested: string[],
+    ): WhatsAppParticipantResult[] => {
+      if (Array.isArray(raw) && raw.length > 0) {
+        return raw.map((r, i) => ({
+          jid: r.jid ?? requested[i] ?? '',
+          status: r.status ?? 'ok',
+        }));
+      }
+      return requested.map((jid) => ({ jid, status: 'ok' }));
+    };
+
+    return {
+      listGroups: async () => {
+        const map = await op(
+          'groupFetchAllParticipating',
+          (s) => s.groupFetchAllParticipating!(),
+          'list-groups',
+        );
+        return Object.values(map ?? {}).map((m) => toSummary(toInfo(m)));
+      },
+      getGroupInfo: async (jid) =>
+        toInfo(await op('groupMetadata', (s) => s.groupMetadata!(jid), 'group-info')),
+      createGroup: async (subject, participants) =>
+        toInfo(await op('groupCreate', (s) => s.groupCreate!(subject, participants), 'create-group')),
+      leaveGroup: async (jid) => {
+        await op('groupLeave', (s) => s.groupLeave!(jid), 'leave-group');
+      },
+      addParticipants: async (jid, participants) =>
+        participantResults(
+          await op('groupParticipantsUpdate', (s) => s.groupParticipantsUpdate!(jid, participants, 'add'), 'add-participants'),
+          participants,
+        ),
+      removeParticipants: async (jid, participants) =>
+        participantResults(
+          await op('groupParticipantsUpdate', (s) => s.groupParticipantsUpdate!(jid, participants, 'remove'), 'remove-participants'),
+          participants,
+        ),
+      promoteParticipants: async (jid, participants) =>
+        participantResults(
+          await op('groupParticipantsUpdate', (s) => s.groupParticipantsUpdate!(jid, participants, 'promote'), 'promote-participants'),
+          participants,
+        ),
+      demoteParticipants: async (jid, participants) =>
+        participantResults(
+          await op('groupParticipantsUpdate', (s) => s.groupParticipantsUpdate!(jid, participants, 'demote'), 'demote-participants'),
+          participants,
+        ),
+      setGroupSubject: async (jid, subject) => {
+        await op('groupUpdateSubject', (s) => s.groupUpdateSubject!(jid, subject), 'set-subject');
+      },
+      setGroupDescription: async (jid, description) => {
+        await op('groupUpdateDescription', (s) => s.groupUpdateDescription!(jid, description), 'set-description');
+      },
+      setGroupSetting: async (jid, setting) => {
+        await op('groupSettingUpdate', (s) => s.groupSettingUpdate!(jid, setting), 'group-setting');
+      },
+      getInviteCode: async (jid) => {
+        const code = await op('groupInviteCode', (s) => s.groupInviteCode!(jid), 'invite-code');
+        if (!code) throw new Error('whatsapp-personal: no invite code returned (are you a group admin?)');
+        return code;
+      },
+      revokeInviteCode: async (jid) => {
+        const code = await op('groupRevokeInvite', (s) => s.groupRevokeInvite!(jid), 'revoke-invite');
+        if (!code) throw new Error('whatsapp-personal: no invite code returned after revoke');
+        return code;
+      },
+      joinGroup: async (inviteCodeOrLink) => {
+        const code = extractInviteCode(inviteCodeOrLink);
+        const groupJid = await op('groupAcceptInvite', (s) => s.groupAcceptInvite!(code), 'join-group');
+        return groupJid ? { groupJid } : {};
+      },
+      inviteInfo: async (inviteCodeOrLink) => {
+        const code = extractInviteCode(inviteCodeOrLink);
+        return toInfo(await op('groupGetInviteInfo', (s) => s.groupGetInviteInfo!(code), 'invite-info'));
+      },
+      checkOnWhatsApp: async (numbers) => {
+        const jids = numbers.map((n) => n.replace(/[^0-9]/g, ''));
+        const res = await op('onWhatsApp', (s) => s.onWhatsApp!(...jids), 'check-number');
+        return numbers.map((input, i) => {
+          const r = (res ?? [])[i];
+          return { input, exists: r?.exists ?? false, ...(r?.jid ? { jid: r.jid } : {}) };
+        });
+      },
+      getProfilePicture: async (jid) => {
+        const url = await op('profilePictureUrl', (s) => s.profilePictureUrl!(jid, 'image'), 'profile-picture');
+        return url ?? null;
+      },
+      blockContact: async (jid) => {
+        await op('updateBlockStatus', (s) => s.updateBlockStatus!(jid, 'block'), 'block');
+      },
+      unblockContact: async (jid) => {
+        await op('updateBlockStatus', (s) => s.updateBlockStatus!(jid, 'unblock'), 'unblock');
+      },
+      getStatus: async (jid) => {
+        const r = await op('fetchStatus', (s) => s.fetchStatus!(jid), 'fetch-status');
+        return r?.status ?? null;
+      },
+      setOwnName: async (name) => {
+        await op('updateProfileName', (s) => s.updateProfileName!(name), 'set-name');
+      },
+      setOwnStatus: async (status) => {
+        await op('updateProfileStatus', (s) => s.updateProfileStatus!(status), 'set-status');
+      },
+      sendReaction: async (jid, messageId, emoji, reactOpts) => {
+        const key = {
+          remoteJid: jid,
+          id: messageId,
+          fromMe: reactOpts?.fromMe ?? false,
+          ...(reactOpts?.participant ? { participant: reactOpts.participant } : {}),
+        };
+        await this.sendMessage(jid, { react: { text: emoji, key } });
+      },
+      sendLocation: async (jid, latitude, longitude, name) =>
+        this.sendMessage(jid, {
+          location: { degreesLatitude: latitude, degreesLongitude: longitude, ...(name ? { name } : {}) },
+        }),
+    };
+  }
+
   /** Close the connection and stop all reconnect attempts. Idempotent. */
   async stop(): Promise<void> {
     this.stopRequested = true;
@@ -565,6 +850,54 @@ export class BaileysClient extends EventEmitter {
   private setStatus(s: WhatsAppConnectionStatus): void {
     this.status = s;
   }
+}
+
+/** Bare digits from any JID/user id (`628123:0@s.whatsapp.net` → `628123`).
+ *  Unlike `extractPhoneFromJid` this does NOT prepend `+` — used for
+ *  digits-only equality checks (e.g. is-self-admin). */
+function bareDigitsFromJid(jid: string | null | undefined): string | null {
+  if (!jid) return null;
+  const head = jid.split('@')[0] ?? '';
+  const num = (head.split(':')[0] ?? '').replace(/[^0-9]/g, '');
+  return num.length > 0 ? num : null;
+}
+
+/**
+ * Extract a WhatsApp group invite code from either a bare code or a full
+ * invite link (`https://chat.whatsapp.com/<code>` or
+ * `https://chat.whatsapp.com/invite/<code>`). Falls back to the trimmed
+ * input so a bare code passes through unchanged.
+ */
+export function extractInviteCode(input: string): string {
+  const m = input.match(/chat\.whatsapp\.com\/(?:invite\/)?([A-Za-z0-9]+)/i);
+  return m ? m[1]! : input.trim();
+}
+
+/** Normalise Baileys' raw GroupMetadata into the stable WhatsAppGroupInfo
+ *  shape, computing `selfIsAdmin` from the operator's own digits. */
+function normalizeGroupInfo(
+  raw: BaileysGroupMetadataRaw,
+  selfDigits: string | null,
+): WhatsAppGroupInfo {
+  const participants = (raw.participants ?? []).map((p) => ({
+    jid: p.id,
+    admin: p.admin ?? null,
+  }));
+  const selfIsAdmin = selfDigits
+    ? participants.some((p) => bareDigitsFromJid(p.jid) === selfDigits && p.admin != null)
+    : false;
+  return {
+    jid: raw.id,
+    subject: raw.subject ?? '',
+    participantCount: raw.size ?? participants.length,
+    selfIsAdmin,
+    announce: raw.announce ?? false,
+    restrict: raw.restrict ?? false,
+    participants,
+    ...(raw.owner ? { owner: raw.owner } : {}),
+    ...(raw.desc ? { description: raw.desc } : {}),
+    ...(raw.creation ? { creation: raw.creation } : {}),
+  };
 }
 
 /** Extract a phone number from a Baileys user JID like `628123:0@s.whatsapp.net`. */
